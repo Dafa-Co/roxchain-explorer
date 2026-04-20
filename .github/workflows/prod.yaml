@@ -1,0 +1,68 @@
+name: RoxChain Explorer -- Production-Grade OIDC
+
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write  
+  contents: read
+
+jobs:
+  build:
+    if: github.actor == 'AliaMousa' || github.actor == 'ahmadgamal99' || github.actor == 'A7medAref'
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Restrict to allowed users
+      run: |
+        if [[ "${GITHUB_TRIGGERING_ACTOR}" != "AliaMousa" && "${GITHUB_TRIGGERING_ACTOR}" != "ahmadgamal99" ]]; then
+          echo "❌ User $GITHUB_TRIGGERING_ACTOR is not allowed to run or rerun this workflow."
+          exit 1
+        fi
+        
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        role-to-assume: arn:aws:iam::780202038201:role/github-oidc-eks-ecr-deploy
+        aws-region: eu-north-1
+
+    - name: Set timestamp for tag
+      run: echo "IMAGE_TAG=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, Tag, and Push the Image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: roxchain-explorer
+        IMAGE_TAG: ${{ env.IMAGE_TAG }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: v1.32.3  
+
+    - name: Configure kubeconfig for EKS cluster
+      run: |
+        aws eks update-kubeconfig --name rox-eks-cluster  --region eu-north-1
+    
+
+    - name: Deploy new image to Kubernetes
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: roxchain-explorer
+        IMAGE_TAG: ${{ env.IMAGE_TAG }}
+      run: |
+        kubectl set image deployment/explorer-app explorer-app=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Verify rollout status
+      run: kubectl rollout status deployment/explorer-app --timeout=90s
